@@ -9,6 +9,7 @@ using Sharp.Extensions.GameEventManager;
 using Sharp.Modules.AdminManager.Shared;
 using Sharp.Shared.Enums;
 using Sharp.Shared.GameEvents;
+using Sharp.Shared.HookParams;
 using Sharp.Shared.Listeners;
 using Sharp.Shared.Objects;
 using Sharp.Shared.Types;
@@ -65,6 +66,14 @@ internal sealed class SleuthModule : IModule, IClientListener
         // broadcast for slots flagged _active[] — i.e. the covert admin whose team we move.
         // This is the canonical blockable game-event hook (see TTT PlayerModule.OnPlayerTeam).
         _eventManager.HookEvent("player_team", OnPlayerTeam);
+
+        // Hook the native 'status' command once for the plugin's lifetime. The handler is a
+        // pass-through (returns Ignored, native prints normally) whenever NO slot is currently
+        // in covert mode — zero overhead and zero behavior change for the common case. When at
+        // least one covert admin IS active, it suppresses the whole native table (the engine
+        // hook is all-or-nothing per invocation) and reprints a reconstructed listing that
+        // excludes the covert slots. See OnPrintStatus for the full rationale + caveats.
+        _bridge.HookManager.PrintStatus.InstallHookPre(OnPrintStatus);
     }
 
     public void OnAllSharpModulesLoaded()
@@ -129,6 +138,7 @@ internal sealed class SleuthModule : IModule, IClientListener
     public void Shutdown()
     {
         _bridge.ClientManager.RemoveClientListener(this);
+        _bridge.HookManager.PrintStatus.RemoveHookPre(OnPrintStatus);
 
         // Disable sleuth for all active players on unload (best-effort)
         for (var i = 0; i < 64; i++)
@@ -203,16 +213,17 @@ internal sealed class SleuthModule : IModule, IClientListener
         //   The team-change broadcast that would otherwise announce this move is suppressed by
         //   OnPlayerTeam above (covert slots only).
         //
-        // 'status' CONSOLE LIST (NOT feasible — see README/limitation note):
-        //   The native 'status' command output cannot be filtered per-row. ModSharp only exposes
-        //   IHookManager.PrintStatus, which fires once per invocation and supports just
-        //   Ignored / SkipCallReturnOverride keyed on the *requester* — it's all-or-nothing for
-        //   the whole table, with no per-row buffer to edit. Surgically removing only the covert
-        //   admin's row while leaving the rest of the table intact is impossible, and suppressing
-        //   the entire table for normal players would break a legitimate command for everyone.
-        //   We therefore do NOT touch 'status' — the covert admin's slot still appears in the
-        //   `status` console list (visible via RCON / console), and that is documented as a known
-        //   limitation rather than faked.
+        // 'status' CONSOLE LIST (handled by OnPrintStatus — reconstruction approach):
+        //   The native 'status' output cannot be filtered per-row: IHookManager.PrintStatus fires
+        //   once per invocation, BEFORE native builds any output, and supports only
+        //   Ignored / SkipCallReturnOverride — it's all-or-nothing for the whole table, with no
+        //   per-row buffer to edit. We work around this by suppressing the native table entirely
+        //   (SkipCallReturnOverride) and reprinting a reconstructed listing that omits the covert
+        //   slots. This only kicks in while at least one covert admin is active; otherwise the
+        //   hook returns Ignored and native status prints unchanged. Caveats (see OnPrintStatus):
+        //   real ping/packet-loss are not exposed by the public API (placeholders are printed),
+        //   and the server-console/RCON path routes through IModSharp.LogMessage (best-effort,
+        //   not byte-identical to native).
         var controller = client.GetPlayerController();
         if (controller is not null)
         {
@@ -326,6 +337,102 @@ internal sealed class SleuthModule : IModule, IClientListener
             return (int)(byte)client.Slot;
 
         return -1;
+    }
+
+    // ===== 'status' suppression / reconstruction =====
+
+    /// <summary>
+    /// Pre-hook for the native <c>status</c> command. Fires once per invocation, before the engine
+    /// builds any output, with <see cref="IPrintStatusHookParams.Client"/> set to the requester
+    /// (or <c>null</c> for server console / RCON).
+    /// <para>
+    /// When NO slot is currently in covert mode this returns <see cref="EHookAction.Ignored"/> so the
+    /// native table prints exactly as before — zero overhead, zero behavior change for the common case.
+    /// </para>
+    /// <para>
+    /// When at least one covert admin IS active, the engine hook is all-or-nothing (it cannot drop a
+    /// single row), so we suppress the entire native table via
+    /// <see cref="EHookAction.SkipCallReturnOverride"/> and reprint a reconstructed listing that omits
+    /// every <c>_active[]</c> slot. Lines go to the requester's console
+    /// (<see cref="IGameClient.ConsolePrint"/>); for the server-console / RCON case there is no
+    /// per-target console writer, so we route through <see cref="IModSharp.LogMessage"/> (best-effort).
+    /// </para>
+    /// <para>
+    /// Caveat: real ping and packet-loss are NOT exposed by the public API, so those columns use
+    /// placeholders (<c>0</c> / <c>0.00</c>). All clients are resolved/validated fresh on the game
+    /// thread inside this handler; no native objects are stored.
+    /// </para>
+    /// </summary>
+    private HookReturnValue<EmptyHookReturn> OnPrintStatus(
+        IPrintStatusHookParams param,
+        HookReturnValue<EmptyHookReturn> current)
+    {
+        // No covert slot active → let native status run unchanged.
+        var anyCovert = false;
+        for (var i = 0; i < 64; i++)
+        {
+            if (_active[i])
+            {
+                anyCovert = true;
+                break;
+            }
+        }
+
+        if (!anyCovert)
+            return new HookReturnValue<EmptyHookReturn>(EHookAction.Ignored);
+
+        // At least one covert admin → suppress the native table, reprint a filtered reconstruction.
+        var requester = param.Client;
+
+        void Emit(string line)
+        {
+            if (requester is { IsValid: true, IsInGame: true })
+                requester.ConsolePrint(line);
+            else
+                _bridge.ModSharp.LogMessage(line);
+        }
+
+        // Header (cosmetic; mimics native 'status' so tooling that greps columns still works).
+        Emit("# userid name uniqueid connected ping loss state rate");
+
+        foreach (var c in _bridge.ClientManager.GetGameClients(inGame: true))
+        {
+            if (c is not { IsValid: true })
+                continue;
+
+            var slot = (int)(byte)c.Slot;
+            if (slot is < 0 or >= 64)
+                continue;
+
+            // Hide covert admins.
+            if (_active[slot])
+                continue;
+
+            var uniqueId = c.IsFakeClient || c.IsHltv ? "BOT" : c.SteamId.ToString();
+            var state    = c.SignOnState == SignOnState.Full ? "active" : "spawning";
+            var time     = FormatConnectedTime(c.GetTimeConnected());
+
+            // # userid "name" uniqueid connected ping loss state
+            Emit($"# {(uint)c.UserId} \"{c.Name}\" {uniqueId} {time} 0 0.00 {state}");
+        }
+
+        return new HookReturnValue<EmptyHookReturn>(EHookAction.SkipCallReturnOverride);
+    }
+
+    /// <summary>Format seconds-connected as native-style <c>mm:ss</c> (or <c>h:mm:ss</c> past an hour).</summary>
+    private static string FormatConnectedTime(float seconds)
+    {
+        if (seconds < 0f || float.IsNaN(seconds) || float.IsInfinity(seconds))
+            seconds = 0f;
+
+        var total = (int)seconds;
+        var hours = total / 3600;
+        var mins  = total % 3600 / 60;
+        var secs  = total % 60;
+
+        return hours > 0
+            ? $"{hours}:{mins:D2}:{secs:D2}"
+            : $"{mins:D2}:{secs:D2}";
     }
 
     // ===== IClientListener =====
