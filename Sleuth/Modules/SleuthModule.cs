@@ -5,8 +5,10 @@ using System.Threading;
 using ConnectionMessages.Shared;
 using HexTags.Shared;
 using Microsoft.Extensions.Logging;
+using Sharp.Extensions.GameEventManager;
 using Sharp.Modules.AdminManager.Shared;
 using Sharp.Shared.Enums;
+using Sharp.Shared.GameEvents;
 using Sharp.Shared.Listeners;
 using Sharp.Shared.Objects;
 using Sharp.Shared.Types;
@@ -23,6 +25,7 @@ internal sealed class SleuthModule : IModule, IClientListener
     private readonly InterfaceBridge      _bridge;
     private readonly ILogger<SleuthModule> _logger;
     private readonly ISleuthConfig         _config;
+    private readonly IGameEventManager     _eventManager;
 
     // Cross-plugin refs — resolved in OAM, null-safe if plugins absent
     private IHexTagsShared?            _hexTags;
@@ -31,11 +34,16 @@ internal sealed class SleuthModule : IModule, IClientListener
     int IClientListener.ListenerVersion  => IClientListener.ApiVersion;
     int IClientListener.ListenerPriority => 0;
 
-    public SleuthModule(InterfaceBridge bridge, ILogger<SleuthModule> logger, ISleuthConfig config)
+    public SleuthModule(
+        InterfaceBridge       bridge,
+        ILogger<SleuthModule> logger,
+        ISleuthConfig         config,
+        IGameEventManager     eventManager)
     {
-        _bridge = bridge;
-        _logger = logger;
-        _config = config;
+        _bridge       = bridge;
+        _logger       = logger;
+        _config       = config;
+        _eventManager = eventManager;
 
         for (var i = 0; i < 64; i++)
             _savedTeam[i] = CStrikeTeam.UnAssigned;
@@ -47,6 +55,16 @@ internal sealed class SleuthModule : IModule, IClientListener
     {
         _bridge.ClientManager.InstallClientListener(this);
         return true;
+    }
+
+    public void OnPostInit()
+    {
+        // Hook "player_team" once for the plugin's lifetime. The handler is a no-op
+        // (returns Ignored) for every slot that is NOT currently in covert mode, so normal
+        // team changes for everyone else broadcast exactly as before. We only suppress the
+        // broadcast for slots flagged _active[] — i.e. the covert admin whose team we move.
+        // This is the canonical blockable game-event hook (see TTT PlayerModule.OnPlayerTeam).
+        _eventManager.HookEvent("player_team", OnPlayerTeam);
     }
 
     public void OnAllSharpModulesLoaded()
@@ -176,7 +194,25 @@ internal sealed class SleuthModule : IModule, IClientListener
         if (_connMsg is not null && _config.SilenceAnnouncements)
             _connMsg.SetSilent(slot, true);
 
-        // (c) Save current team and switch to configured stealth team
+        // (c) Save current team and switch to configured stealth team.
+        //
+        // SCOREBOARD HIDE (feasible, implemented here):
+        //   Moving the controller to UnAssigned (0) drops it off ALL THREE rendered scoreboard
+        //   sections (CT / T / Spectators). Spectator (1) only hides from the playing teams —
+        //   the player still shows under the "Spectators" header — so UnAssigned hides better.
+        //   The team-change broadcast that would otherwise announce this move is suppressed by
+        //   OnPlayerTeam above (covert slots only).
+        //
+        // 'status' CONSOLE LIST (NOT feasible — see README/limitation note):
+        //   The native 'status' command output cannot be filtered per-row. ModSharp only exposes
+        //   IHookManager.PrintStatus, which fires once per invocation and supports just
+        //   Ignored / SkipCallReturnOverride keyed on the *requester* — it's all-or-nothing for
+        //   the whole table, with no per-row buffer to edit. Surgically removing only the covert
+        //   admin's row while leaving the rest of the table intact is impossible, and suppressing
+        //   the entire table for normal players would break a legitimate command for everyone.
+        //   We therefore do NOT touch 'status' — the covert admin's slot still appears in the
+        //   `status` console list (visible via RCON / console), and that is documented as a known
+        //   limitation rather than faked.
         var controller = client.GetPlayerController();
         if (controller is not null)
         {
@@ -236,6 +272,60 @@ internal sealed class SleuthModule : IModule, IClientListener
             client.Print(HudPrintChannel.Chat, " [Sleuth] Stealth mode \x07FF4444OFF\x01.");
 
         _logger.LogInformation("[Sleuth] {Name} (slot {Slot}) left stealth mode ({Reason}).", client.Name, slot, reason);
+    }
+
+    // ===== player_team suppression =====
+
+    /// <summary>
+    /// Hooked for the plugin lifetime. Suppresses the "X joined Spectators / Counter-Terrorists"
+    /// broadcast ONLY for slots currently in covert mode — every other team change is left
+    /// untouched (returns <see cref="EHookAction.Ignored"/>).
+    /// <para>
+    /// Resolution order for the slot: the typed event's <c>Controller</c> first; if that is null
+    /// (it can be during teardown) fall back to resolving via <c>UserId</c> through
+    /// <see cref="Sharp.Shared.Managers.IClientManager"/>.
+    /// </para>
+    /// <para>
+    /// Suppression strategy: set the event's <c>Silent</c> flag (engine's own "no announcement"
+    /// switch) AND block the client broadcast via <see cref="EHookAction.ChangeParamReturnDefault"/>
+    /// with <paramref name="serverOnly"/> = true — this lets the engine still process the team
+    /// change server-side (so the move actually happens / scoreboard team updates) while clients
+    /// never see the join message. (SkipCallReturnOverride would short-circuit before serverOnly
+    /// is applied and skip the engine's own bookkeeping, so we use ChangeParamReturnDefault here.)
+    /// </para>
+    /// </summary>
+    private HookReturnValue<bool> OnPlayerTeam(IGameEvent gameEvent, ref bool serverOnly)
+    {
+        if (gameEvent is not IEventPlayerTeam evt)
+            return new HookReturnValue<bool>(EHookAction.Ignored);
+
+        // Resolve the affected slot. Controller is the cheap path; fall back to UserId.
+        var slot = ResolveSlot(evt);
+        if (slot < 0)
+            return new HookReturnValue<bool>(EHookAction.Ignored);
+
+        // Not a covert slot → leave the event completely alone (normal broadcast).
+        if (!_active[slot])
+            return new HookReturnValue<bool>(EHookAction.Ignored);
+
+        // Covert slot → silence the announcement and suppress the client broadcast,
+        // but let the engine still apply the team change server-side.
+        evt.Silent = true;
+        serverOnly = true;
+        return new HookReturnValue<bool>(EHookAction.ChangeParamReturnDefault);
+    }
+
+    /// <summary>Resolve the 0–63 player slot for a player_team event, or -1 if unresolvable.</summary>
+    private int ResolveSlot(IEventPlayerTeam evt)
+    {
+        if (evt.Controller is { } controller)
+            return (int)(byte)controller.PlayerSlot;
+
+        var client = _bridge.ClientManager.GetGameClient(evt.UserId);
+        if (client is not null)
+            return (int)(byte)client.Slot;
+
+        return -1;
     }
 
     // ===== IClientListener =====

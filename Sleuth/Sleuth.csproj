@@ -18,6 +18,23 @@
     <ProjectReference Include="/home/claude/cs2-hextags/HexTags.Shared/HexTags.Shared.csproj" Private="false" />
   </ItemGroup>
 
+  <!--
+    Ship ONLY the GameEventManager extension implementation DLL alongside Sleuth.dll.
+    The server core does NOT provide this assembly (unlike Sharp.Shared / Microsoft.Extensions.*),
+    so it must land in the output. We copy just this one file (rather than enabling
+    CopyLocalLockFileAssemblies, which would also drag in core-provided Microsoft.Extensions.*
+    assemblies and risk assembly-load-context / TypeLoad conflicts).
+  -->
+  <Target Name="CopyGameEventManager" AfterTargets="Build">
+    <ItemGroup>
+      <_GemDll Include="@(ResolvedCompileFileDefinitions)"
+               Condition="'%(FileName)' == 'Sharp.Extensions.GameEventManager'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_GemDll)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <!-- Copy .assets/* (locales, configs, etc) into .build/ so modsharp-deploy bundles them -->
   <Target Name="CopyAssets" AfterTargets="Build">
     <PropertyGroup>

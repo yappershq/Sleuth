@@ -2,6 +2,7 @@ using System;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Sharp.Extensions.GameEventManager;
 using Sharp.Shared;
 
 namespace Sleuth;
@@ -41,6 +42,12 @@ public sealed class SleuthPlugin : IModSharpModule
         services.AddSingleton(InterfaceBridge.Instance);
         services.AddSingleton<ILoggerFactory>(loggerFactory);
         services.AddSingleton(typeof(ILogger<>), typeof(LoggerFactoryLogger<>));
+
+        // IGameEventManager — used by SleuthModule to hook/block "player_team" broadcasts.
+        // Registers GameEventManager as both IGameEventManager and ISharpExtension (its own
+        // lifecycle install as the global IEventListener). Requires ISharedSystem first (added above).
+        services.AddGameEventManager();
+
         services.AddModules();
 
         _serviceProvider = services.BuildServiceProvider();

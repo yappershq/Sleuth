@@ -30,6 +30,14 @@
     <PackageReference Include="ModSharp.Sharp.Shared" Version="$(ModSharpVersion)" PrivateAssets="all" ExcludeAssets="runtime" />
     <PackageReference Include="ModSharp.Sharp.Modules.LocalizerManager.Shared" Version="$(ModSharpVersion)" PrivateAssets="all" ExcludeAssets="runtime" />
     <PackageReference Include="ModSharp.Sharp.Modules.AdminManager.Shared" Version="$(ModSharpVersion)" PrivateAssets="all" ExcludeAssets="runtime" />
+    <!--
+      GameEventManager: per-event-name hook/listen wrapper around the core IEventListener plumbing.
+      Used to BLOCK the "player_team" broadcast while a covert admin's team is being changed.
+      NOTE: unlike the *.Shared stubs above, this ships its implementation DLL at runtime —
+      do NOT add ExcludeAssets="runtime" or PrivateAssets="all" (either would strip the runtime
+      asset from the build output). LevelRank ships it the same way (plain PackageReference).
+    -->
+    <PackageReference Include="ModSharp.Sharp.Extensions.GameEventManager" Version="$(ModSharpVersion)" />
   </ItemGroup>
 
 </Project>
