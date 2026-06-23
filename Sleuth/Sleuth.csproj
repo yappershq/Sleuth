@@ -37,6 +37,40 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <!--
+    Cross-plugin .Shared.dll placement — THE FIX for the FileNotFoundException at runtime.
+
+    ModSharp loads each module into its OWN McMaster PluginLoader (a private AssemblyLoadContext,
+    PreferSharedTypes=true). It UNIFIES a foreign assembly's type identity across modules ONLY
+    when that assembly is loaded into AssemblyLoadContext.Default — which the core does by loading
+    everything under /game/sharp/shared/ and hooking Default.Resolving
+    (Sharp.Core SharpModuleManager.LoadSharedLibrary). PreferSharedTypes then makes every module
+    resolve the foreign .Shared types from that single Default-ALC copy.
+
+    The foreign interfaces (IHexTagsShared / IConnectionMessagesShared / IAdminPanelShared) are
+    referenced Private="false" (NOT bundled next to Sleuth.dll) — that is correct: bundling a
+    private copy into the module dir would create a SECOND type identity, and the cast inside
+    GetOptionalSharpModuleInterface<T> would fail (returns null / FileNotFound at JIT). The DLLs
+    must instead live in /game/sharp/shared/<Name>/. modsharp-deploy ships .build/shared/* there,
+    so we emit each consumed foreign .Shared.dll into .build/shared/<Name>/ (mirrors the proven
+    Jailbreak `shared/` precedent). If the publisher plugin also ships the same DLL to shared/,
+    that is harmless (identical name+version -> one Default-ALC load; PreferSharedTypes dedupes).
+  -->
+  <Target Name="CopyForeignSharedToSharedDir" AfterTargets="Build">
+    <PropertyGroup>
+      <SharedDir>$(MSBuildThisFileDirectory)..\.build\shared\</SharedDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_ForeignShared Include="@(ReferencePathWithRefAssemblies)"
+                      Condition="'%(FileName)' == 'HexTags.Shared'
+                              Or '%(FileName)' == 'ConnectionMessages.Shared'
+                              Or '%(FileName)' == 'AdminPanel.Shared'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ForeignShared)"
+          DestinationFiles="@(_ForeignShared -> '$(SharedDir)%(FileName)\%(FileName)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <!-- Copy .assets/* (locales, configs, etc) into .build/ so modsharp-deploy bundles them -->
   <Target Name="CopyAssets" AfterTargets="Build">
     <PropertyGroup>
