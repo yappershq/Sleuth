@@ -17,7 +17,7 @@
     <!-- HexTags.Shared — consume IHexTagsShared -->
     <ProjectReference Include="/home/claude/cs2-hextags/HexTags.Shared/HexTags.Shared.csproj" Private="false" />
     <!-- AdminPanel.Shared — consume IAdminPanelShared (register in-game admin-menu action) -->
-    <ProjectReference Include="/home/claude/AdminPanel/AdminPanel.Shared/AdminPanel.Shared.csproj" Private="false" />
+    <PackageReference Include="YappersHQ.AdminPanel.Shared" Version="1.0.0" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <!--
