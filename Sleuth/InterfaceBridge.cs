@@ -1,3 +1,4 @@
+using System;
 using Microsoft.Extensions.Logging;
 using Sharp.Modules.AdminManager.Shared;
 using Sharp.Modules.LocalizerManager.Shared;
@@ -56,7 +57,19 @@ internal sealed class InterfaceBridge
             return;
 
         LocalizerManager = lm;
-        lm.LoadLocaleFile("sleuth", suppressDuplicationWarnings: true);
+
+        // Optional locale file. Sleuth ships no sleuth.json (it uses no localized strings yet),
+        // so LoadLocaleFile would throw FileNotFoundException and abort OnAllModulesLoaded.
+        // Guard it: a missing locale must never crash plugin load.
+        try
+        {
+            lm.LoadLocaleFile("sleuth", suppressDuplicationWarnings: true);
+        }
+        catch (Exception e)
+        {
+            LoggerFactory.CreateLogger<InterfaceBridge>()
+                .LogWarning(e, "[Sleuth] sleuth.json locale not found — continuing without localization.");
+        }
     }
 
     internal void InitAdminManager()
