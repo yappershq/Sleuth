@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Threading;
+using AdminPanel.Shared;
 using ConnectionMessages.Shared;
 using HexTags.Shared;
 using Microsoft.Extensions.Logging;
@@ -31,6 +32,10 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
     // Cross-plugin refs — resolved in OAM, null-safe if plugins absent
     private IHexTagsShared?            _hexTags;
     private IConnectionMessagesShared? _connMsg;
+    private IAdminPanelShared?         _adminPanel;
+
+    // Id of the registered AdminPanel global action (for Unregister on Shutdown).
+    private const string AdminPanelActionId = "sleuth.covert";
 
     int IClientListener.ListenerVersion  => IClientListener.ApiVersion;
     int IClientListener.ListenerPriority => 0;
@@ -137,6 +142,56 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
         );
 
         _logger.LogInformation("[Sleuth] Admin command 'sleuth' registered with permission 'sleuth:stealth'.");
+
+        // Resolve AdminPanel (optional dep) and register an in-game admin-menu action that
+        // toggles the acting admin's own covert mode — reuses the exact Enable/DisableSleuth
+        // logic the 'sleuth' chat command drives. Null-guarded: if AdminPanel is not installed
+        // on the server, this is skipped silently and Sleuth keeps working standalone.
+        var adminPanelIface = _bridge.SharpModuleManager
+            .GetOptionalSharpModuleInterface<IAdminPanelShared>(IAdminPanelShared.Identity);
+        if (adminPanelIface?.Instance is { } panel)
+        {
+            _adminPanel = panel;
+
+            // Self-toggle is a global action (no target player). OnSelected gives us the acting
+            // admin's slot; we resolve+validate the client fresh on the game thread (no stored
+            // native objects) and dispatch to the same private toggle the chat command uses.
+            panel.RegisterGlobalAction(new AdminPanelGlobalAction
+            {
+                Id         = AdminPanelActionId,
+                Label      = "Sleuth: toggle stealth",
+                Permission = "sleuth:stealth",
+                SortOrder  = 100,
+                OnSelected = adminSlot =>
+                {
+                    if (adminSlot is < 0 or >= 64)
+                        return;
+
+                    var client = _bridge.ClientManager
+                        .GetGameClient(new Sharp.Shared.Units.PlayerSlot((byte)adminSlot));
+                    if (client is not { IsInGame: true })
+                        return;
+
+                    if (!_config.Enabled)
+                    {
+                        client.Print(HudPrintChannel.Chat, " [Sleuth] Plugin is disabled.");
+                        return;
+                    }
+
+                    var slot = (int)(byte)client.Slot;
+                    if (_active[slot])
+                        DisableSleuth(client, slot, reason: "command");
+                    else
+                        EnableSleuth(client, slot);
+                },
+            });
+
+            _logger.LogInformation("[Sleuth] AdminPanel integration enabled — 'Sleuth: toggle stealth' registered.");
+        }
+        else
+        {
+            _logger.LogInformation("[Sleuth] AdminPanel not available — admin-menu action not registered (standalone mode).");
+        }
     }
 
     public void Shutdown()
@@ -144,6 +199,9 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
         _bridge.ClientManager.RemoveClientListener(this);
         _bridge.ModSharp.RemoveGameListener(this);
         _bridge.HookManager.PrintStatus.RemoveHookPre(OnPrintStatus);
+
+        // Remove the AdminPanel action we registered (best-effort; no-op if AdminPanel absent).
+        _adminPanel?.Unregister(AdminPanelActionId);
 
         // Disable sleuth for all active players on unload (best-effort)
         for (var i = 0; i < 64; i++)
