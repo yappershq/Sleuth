@@ -1,0 +1,17 @@
+{
+  "Sleuth.On": {
+    "en-US": " [Sleuth] Stealth mode {{green}}ON{{default}}."
+  },
+  "Sleuth.Off": {
+    "en-US": " [Sleuth] Stealth mode {{red}}OFF{{default}}."
+  },
+  "Sleuth.AlreadyOn": {
+    "en-US": " [Sleuth] Already in stealth mode."
+  },
+  "Sleuth.NotOn": {
+    "en-US": " [Sleuth] Not in stealth mode."
+  },
+  "Sleuth.Disabled": {
+    "en-US": " [Sleuth] Plugin is disabled."
+  }
+}

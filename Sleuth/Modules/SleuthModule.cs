@@ -8,6 +8,7 @@ using HexTags.Shared;
 using Microsoft.Extensions.Logging;
 using Sharp.Extensions.GameEventManager;
 using Sharp.Modules.AdminManager.Shared;
+using Sharp.Modules.LocalizerManager.Shared;
 using Sharp.Shared.Enums;
 using Sharp.Shared.GameEvents;
 using Sharp.Shared.HookParams;
@@ -15,14 +16,16 @@ using Sharp.Shared.Listeners;
 using Sharp.Shared.Objects;
 using Sharp.Shared.Types;
 using Sleuth.Configuration;
+using Sleuth.Extensions;
 
 namespace Sleuth.Modules;
 
 internal sealed class SleuthModule : IModule, IClientListener, IGameListener
 {
     // Per-slot state (indexed by PlayerSlot byte 0–63)
-    private readonly bool[]        _active    = new bool[64];           // currently in sleuth mode
-    private readonly CStrikeTeam[] _savedTeam = new CStrikeTeam[64];   // team before sleuth
+    private readonly bool[]        _active                = new bool[64];    // currently in sleuth mode
+    private readonly CStrikeTeam[] _savedTeam             = new CStrikeTeam[64]; // team before sleuth
+    private readonly string?[]     _savedTeamSelectCvar   = new string?[64]; // sv_disable_teamselect_menu before sleuth
 
     private readonly InterfaceBridge      _bridge;
     private readonly ILogger<SleuthModule> _logger;
@@ -174,7 +177,7 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
 
                     if (!_config.Enabled)
                     {
-                        client.Print(HudPrintChannel.Chat, " [Sleuth] Plugin is disabled.");
+                        Chat(client, "Sleuth.Disabled", " [Sleuth] Plugin is disabled.");
                         return;
                     }
 
@@ -227,27 +230,29 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
 
         if (!_config.Enabled)
         {
-            invoker.Print(HudPrintChannel.Chat, " [Sleuth] Plugin is disabled.");
+            Chat(invoker, "Sleuth.Disabled", " [Sleuth] Plugin is disabled.");
             return;
         }
 
         var slot = (int)(byte)invoker.Slot;
 
-        // Parse optional arg: "sleuth on" / "sleuth off" / "sleuth" (toggle)
-        var arg = command.ArgCount >= 1 ? command.GetArg(1).Trim().ToLowerInvariant() : "";
-
-        bool enable;
-        if (arg == "on")
-            enable = true;
-        else if (arg == "off")
-            enable = false;
-        else
-            enable = !_active[slot];   // toggle
-
-        if (enable)
-            EnableSleuth(invoker, slot);
-        else
+        // Pure toggle: !sleuth flips stealth on/off (no on/off sub-arg).
+        if (_active[slot])
             DisableSleuth(invoker, slot, reason: "command");
+        else
+            EnableSleuth(invoker, slot);
+    }
+
+    // Send a chat line to a client: localized via LocalizerManager when present
+    // (key in sleuth.json, {{green}} tokens), else the English fallback. ChatFormat
+    // turns {green}/{red}/{default} tokens into real chat color escapes either way.
+    private void Chat(IGameClient client, string key, string fallback)
+    {
+        var lm = _bridge.LocalizerManager;
+        if (lm is not null)
+            lm.For(client).Localized(key).Prefix(null).Transform(ChatFormat.ProcessColorCodes).Print();
+        else
+            client.Print(HudPrintChannel.Chat, ChatFormat.ProcessColorCodes(fallback));
     }
 
     // ===== Enable / Disable =====
@@ -256,11 +261,25 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
     {
         if (_active[slot])
         {
-            client.Print(HudPrintChannel.Chat, " [Sleuth] Already in stealth mode.");
+            Chat(client, "Sleuth.AlreadyOn", " [Sleuth] Already in stealth mode.");
             return;
         }
 
         _active[slot] = true;
+
+        // (a-pre) Disable team-select UI for this client by replicating sv_disable_teamselect_menu=1.
+        // Capture the current server value so we can restore it precisely on leave.
+        // Guard: fake clients have no real network connection — ReplicateToClient is a no-op for
+        // them and FindConVar is safe, but skip the round-trip for clarity.
+        if (!client.IsFakeClient)
+        {
+            var cvar = _bridge.ConVarManager.FindConVar("sv_disable_teamselect_menu");
+            if (cvar is not null)
+            {
+                _savedTeamSelectCvar[slot] = cvar.GetString();
+                cvar.ReplicateToClient(client, "1");
+            }
+        }
 
         // (a) Hide HexTag
         _hexTags?.SetHidden(slot, true);
@@ -301,14 +320,23 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
             };
 
             if (controller.Team != targetTeam)
+            {
+                // Slay a LIVE pawn before the team transfer. Moving a still-alive controller to
+                // Spectator/UnAssigned orphans its pawn — the body stays in the world as a "ghost".
+                // Slaying first removes it cleanly. (No-op if already dead / no pawn.)
+                var pawn = controller.GetPlayerPawn();
+                if (pawn is { IsValidEntity: true, IsAlive: true })
+                    pawn.Slay();
+
                 controller.SwitchTeam(targetTeam);
+            }
         }
         else
         {
             _savedTeam[slot] = CStrikeTeam.UnAssigned;
         }
 
-        client.Print(HudPrintChannel.Chat, " [Sleuth] Stealth mode \x04ON\x01.");
+        Chat(client, "Sleuth.On", " [Sleuth] Stealth mode {green}ON{default}.");
         _logger.LogInformation("[Sleuth] {Name} (slot {Slot}) entered stealth mode.", client.Name, slot);
     }
 
@@ -317,7 +345,7 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
         if (!_active[slot])
         {
             if (reason == "command")
-                client.Print(HudPrintChannel.Chat, " [Sleuth] Not in stealth mode.");
+                Chat(client, "Sleuth.NotOn", " [Sleuth] Not in stealth mode.");
             return;
         }
 
@@ -344,8 +372,20 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
 
         _savedTeam[slot] = CStrikeTeam.UnAssigned;
 
+        // Restore sv_disable_teamselect_menu to the server's value for this client.
+        if (!client.IsFakeClient)
+        {
+            var cvar = _bridge.ConVarManager.FindConVar("sv_disable_teamselect_menu");
+            if (cvar is not null)
+            {
+                var restore = _savedTeamSelectCvar[slot] ?? cvar.GetString();
+                cvar.ReplicateToClient(client, restore);
+            }
+            _savedTeamSelectCvar[slot] = null;
+        }
+
         if (reason == "command")
-            client.Print(HudPrintChannel.Chat, " [Sleuth] Stealth mode \x07FF4444OFF\x01.");
+            Chat(client, "Sleuth.Off", " [Sleuth] Stealth mode {red}OFF{default}.");
 
         _logger.LogInformation("[Sleuth] {Name} (slot {Slot}) left stealth mode ({Reason}).", client.Name, slot, reason);
     }
@@ -506,9 +546,12 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
     {
         var slot = (int)(byte)client.Slot;
 
-        // Clean up without trying to call SwitchTeam on a disconnecting client
-        _active[slot]    = false;
-        _savedTeam[slot] = CStrikeTeam.UnAssigned;
+        // Clean up without trying to call SwitchTeam on a disconnecting client.
+        // sv_disable_teamselect_menu replication is also skipped — the client is disconnecting
+        // and there is no network channel to send it on.
+        _active[slot]               = false;
+        _savedTeam[slot]            = CStrikeTeam.UnAssigned;
+        _savedTeamSelectCvar[slot]  = null;
 
         // Clean up cross-plugin state
         _hexTags?.SetHidden(slot, false);
@@ -527,6 +570,7 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
     void IGameListener.OnGameShutdown()
     {
         Array.Clear(_active);
+        Array.Clear(_savedTeamSelectCvar);
         for (var i = 0; i < 64; i++)
             _savedTeam[i] = CStrikeTeam.UnAssigned;
     }

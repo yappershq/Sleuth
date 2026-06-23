@@ -61,7 +61,12 @@
       <SharedDir>$(MSBuildThisFileDirectory)..\.build\shared\</SharedDir>
     </PropertyGroup>
     <ItemGroup>
-      <_ForeignShared Include="@(ReferencePathWithRefAssemblies)"
+      <!-- Use ReferencePath (the real IMPLEMENTATION output of each ProjectReference),
+           NOT ReferencePathWithRefAssemblies — the latter resolves the publishers'
+           reference assemblies (ReferenceAssemblyAttribute, ~4 KB), which the server
+           CANNOT load for execution (BadImageFormatException 0x80131058) and which
+           would clobber the publishers' good shared DLLs at /game/sharp/shared/. -->
+      <_ForeignShared Include="@(ReferencePath)"
                       Condition="'%(FileName)' == 'HexTags.Shared'
                               Or '%(FileName)' == 'ConnectionMessages.Shared'
                               Or '%(FileName)' == 'AdminPanel.Shared'" />
