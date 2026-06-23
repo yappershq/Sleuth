@@ -17,7 +17,7 @@ using Sleuth.Configuration;
 
 namespace Sleuth.Modules;
 
-internal sealed class SleuthModule : IModule, IClientListener
+internal sealed class SleuthModule : IModule, IClientListener, IGameListener
 {
     // Per-slot state (indexed by PlayerSlot byte 0–63)
     private readonly bool[]        _active    = new bool[64];           // currently in sleuth mode
@@ -34,6 +34,9 @@ internal sealed class SleuthModule : IModule, IClientListener
 
     int IClientListener.ListenerVersion  => IClientListener.ApiVersion;
     int IClientListener.ListenerPriority => 0;
+
+    int IGameListener.ListenerVersion  => IGameListener.ApiVersion;
+    int IGameListener.ListenerPriority => 0;
 
     public SleuthModule(
         InterfaceBridge       bridge,
@@ -55,6 +58,7 @@ internal sealed class SleuthModule : IModule, IClientListener
     public bool Init()
     {
         _bridge.ClientManager.InstallClientListener(this);
+        _bridge.ModSharp.InstallGameListener(this);
         return true;
     }
 
@@ -138,6 +142,7 @@ internal sealed class SleuthModule : IModule, IClientListener
     public void Shutdown()
     {
         _bridge.ClientManager.RemoveClientListener(this);
+        _bridge.ModSharp.RemoveGameListener(this);
         _bridge.HookManager.PrintStatus.RemoveHookPre(OnPrintStatus);
 
         // Disable sleuth for all active players on unload (best-effort)
@@ -154,9 +159,11 @@ internal sealed class SleuthModule : IModule, IClientListener
 
     private void OnSleuthCommand(IGameClient? invoker, StringCommand command)
     {
-        if (invoker is null)
+        // Must be an in-game client. IsConnected is true during loading/limbo and yields a
+        // half-valid client whose controller/team ops would silently no-op; gate on IsInGame.
+        if (invoker is not { IsInGame: true })
         {
-            _logger.LogWarning("[Sleuth] 'sleuth' command cannot be used from server console.");
+            _logger.LogWarning("[Sleuth] 'sleuth' command requires an in-game client (not server console / connecting player).");
             return;
         }
 
@@ -448,6 +455,22 @@ internal sealed class SleuthModule : IModule, IClientListener
         // Clean up cross-plugin state
         _hexTags?.SetHidden(slot, false);
         _connMsg?.SetSilent(slot, false);
+    }
+
+    // ===== IGameListener =====
+
+    /// <summary>
+    /// On map change the controllers are recreated and the per-slot <c>_savedTeam</c> values become
+    /// stale (they point at a team from the previous map). Clear all per-slot state so a stale saved
+    /// team is never restored onto a freshly-spawned controller and no slot stays flagged covert
+    /// across a map boundary. (Sleuth is a deliberate persistent toggle, so we do NOT clear on
+    /// round restart — only on map end.)
+    /// </summary>
+    void IGameListener.OnGameShutdown()
+    {
+        Array.Clear(_active);
+        for (var i = 0; i < 64; i++)
+            _savedTeam[i] = CStrikeTeam.UnAssigned;
     }
 
     void IClientListener.OnClientConnected(IGameClient client)     { }
