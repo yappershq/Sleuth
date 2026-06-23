@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Sleuth</AssemblyName>
+    <RootNamespace>Sleuth</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ConnectionMessages.Shared — consume IConnectionMessagesShared -->
+    <ProjectReference Include="/home/claude/ConnectionMessages/ConnectionMessages.Shared/ConnectionMessages.Shared.csproj" Private="false" />
+    <!-- HexTags.Shared — consume IHexTagsShared -->
+    <ProjectReference Include="/home/claude/cs2-hextags/HexTags.Shared/HexTags.Shared.csproj" Private="false" />
+  </ItemGroup>
+
+  <!-- Copy .assets/* (locales, configs, etc) into .build/ so modsharp-deploy bundles them -->
+  <Target Name="CopyAssets" AfterTargets="Build">
+    <PropertyGroup>
+      <AssetsDir>$(MSBuildThisFileDirectory)..\.assets\</AssetsDir>
+      <BuildDir>$(MSBuildThisFileDirectory)..\.build\</BuildDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_AssetFiles Include="$(AssetsDir)**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_AssetFiles)"
+          DestinationFiles="@(_AssetFiles -> '$(BuildDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>
