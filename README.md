@@ -1,79 +1,65 @@
-# Sleuth
+<div align="center">
+  <h1><strong>Sleuth</strong></h1>
+  <p>Stealth-admin toggle for ModSharp (CS2) — go covert so cheaters can't spot staff.</p>
+</div>
 
-Stealth-admin toggle for ModSharp (CS2). An admin with the `sleuth:stealth` permission can drop
-into "covert mode" and become as invisible as the engine permits — no chat tag, no join/leave
-spam, no team-change announcement, and removed from the in-game scoreboard.
+<p align="center">
+  <img src="https://img.shields.io/github/stars/yappershq/Sleuth?style=flat&logo=github" alt="Stars">
+</p>
 
-Toggle in chat: `!sleuth` (toggle), `!sleuth on`, `!sleuth off`. Requires the `sleuth:stealth`
-admin permission (registered via AdminManager `MountAdminManifest`).
+---
 
-## What covert mode hides
+Sleuth lets an admin drop into "covert mode" and become as invisible as the engine permits: no chat tag, no join/leave spam, no team-change announcement, and removed from the in-game scoreboard. It degrades gracefully — optional integrations are skipped (with a warning) when the plugin they depend on isn't installed.
 
-When a slot enters covert mode, Sleuth:
+## 🚀 Install
 
-1. **Chat tag** — hides the player's HexTag (via `IHexTagsShared.SetHidden`), if HexTags is loaded.
-2. **Join / leave announcements** — silences the player's connection messages (via
-   `IConnectionMessagesShared.SetSilent`), if ConnectionMessages is loaded and
-   `sleuth_silence_announcements` is on.
-3. **Team-change announcement** — suppresses the `"X joined Spectators / Counter-Terrorists"`
-   broadcast that would otherwise fire when the admin is moved off their team. This is done by
-   hooking the `player_team` game event (`Sharp.Extensions.GameEventManager`) and, **only for
-   slots currently in covert mode**, setting the event's `Silent` flag and returning
-   `ChangeParamReturnDefault` with `serverOnly = true` — the engine still applies the team change
-   server-side, but clients never see the announcement. Team changes for everyone else are left
-   completely untouched.
-4. **Scoreboard** — moves the controller to team `UnAssigned (0)` (configurable via `sleuth_team`).
-   `UnAssigned` drops the player off **all three** rendered scoreboard sections (CT / T /
-   Spectators). `Spectator (1)` only removes them from the playing teams — they would still appear
-   under the "Spectators" header — so `UnAssigned` is the default and hides better.
+Copy the build output into your ModSharp install (`<sharp>` = your `sharp` directory):
 
-On exit (or disconnect / plugin unload) every one of the above is restored: tag visibility,
-announcements, and (if `sleuth_restore_team` is on) the original team.
+| From | To |
+|------|----|
+| `.build/modules/Sleuth/` | `<sharp>/modules/Sleuth/` |
+| `.build/locales/sleuth.json` | `<sharp>/locales/sleuth.json` |
 
-## Known limitation — the `status` console list is NOT hidden
+The `modules/Sleuth/` directory ships both `Sleuth.dll` and the bundled `Sharp.Extensions.GameEventManager.dll` (the server core does not provide that assembly). `configs/sleuth.cfg` is auto-generated on first run. Restart the server (or change map) to load.
 
-The native `status` console command still shows the covert admin's slot, name, SteamID, and ping.
-This is **not** faked or worked around, because it is not feasible to do cleanly:
+**Requires** AdminManager (ships with ModSharp). Optional: [HexTags](https://github.com/yappershq), ConnectionMessages, and AdminPanel — each unlocks an extra covert feature when present.
 
-- ModSharp's only interception point is `IHookManager.PrintStatus`, which fires **once per
-  `status` invocation** and only tells you **who ran it** (the requesting client, or null for
-  server console / RCON).
-- The supported actions are `Ignored` or `SkipCallReturnOverride` — i.e. **all-or-nothing for the
-  whole table**. There is no per-row callback and no string buffer to edit, so you cannot
-  surgically remove a single player's row while leaving the rest of the table intact.
-- The only thing `PrintStatus` could do is suppress the **entire** `status` output for a requester,
-  which would break a legitimate command for normal players (and admins/RCON would still see the
-  full table anyway).
+## ⌨️ Commands
 
-So: covert mode hides the **chat tag**, the **team-change announcement**, **join/leave messages**,
-and removes the admin **from the in-game team scoreboard** (via `UnAssigned`) — but the
-`status` console list (visible via server console / RCON) **still shows the covert slot**. This is
-a CS2 / ModSharp limitation, documented here rather than papered over.
+| Command | Description | Permission |
+|---------|-------------|------------|
+| `!sleuth` | Toggle covert mode on/off for yourself. | `sleuth:stealth` |
 
-## ConVars
+If AdminPanel is installed, the same self-toggle is also exposed as a **Sleuth: toggle stealth** entry in the in-game admin menu (gated on `sleuth:stealth`).
 
-| ConVar | Default | Description |
-|---|---|---|
+## ⚙️ Configuration
+
+`configs/sleuth.cfg` (auto-generated on first run):
+
+| ConVar | Default | Meaning |
+|--------|---------|---------|
 | `sleuth_enabled` | `1` | Enable the plugin. |
 | `sleuth_team` | `0` | Team on entering covert mode: `0` = UnAssigned (hides from scoreboard), `1` = Spectator. |
-| `sleuth_restore_team` | `1` | Restore the original team when leaving covert mode. |
+| `sleuth_restore_team` | `1` | Drop back to Spectator when leaving covert mode so the player can re-pick a team. |
 | `sleuth_silence_announcements` | `1` | Suppress join/leave chat announcements while covert. |
 
-## Dependencies
+## 🔧 How it works
 
-- **AdminManager** (required) — command registration + permission.
-- **GameEventManager** extension (required, bundled) — `player_team` hook. Ships as
-  `Sharp.Extensions.GameEventManager.dll` alongside `Sleuth.dll` (the server core does not provide
-  this assembly).
-- **HexTags** (optional) — chat-tag hiding.
-- **ConnectionMessages** (optional) — join/leave announcement silencing.
+When a slot enters covert mode, Sleuth hides the player's HexTag (if HexTags is loaded), silences their join/leave announcements (if ConnectionMessages is loaded and `sleuth_silence_announcements` is on), suppresses the team-change broadcast by hooking the `player_team` game event for covert slots only, and moves the controller to `UnAssigned` so it drops off all three scoreboard sections (CT / T / Spectators). On exit, disconnect, or plugin unload, every change is restored.
 
-Optional dependencies degrade gracefully: if absent, the corresponding covert feature is simply
-skipped and a warning is logged.
+**Known limitation:** the native `status` console list still shows the covert slot. ModSharp's `PrintStatus` hook is all-or-nothing per invocation with no per-row callback, so Sleuth reconstructs a filtered listing for the requesting client where it can, but real ping/loss are not exposed by the public API and the table cannot be surgically edited row-by-row.
 
-## Build
+## 📦 Build
 
 ```bash
-cd /home/claude/Sleuth
-dotnet build *.slnx -c Release --nologo -clp:ErrorsOnly
+dotnet build -c Release
 ```
+
+Outputs `.build/modules/Sleuth/Sleuth.dll` (plus the bundled `Sharp.Extensions.GameEventManager.dll`), and copies `.assets/locales/sleuth.json` to `.build/locales/`.
+
+---
+
+<div align="center">
+  <p>Made with ❤️ by <a href="https://github.com/yappershq">yappershq</a></p>
+  <p>⭐ Star this repo if you find it useful!</p>
+</div>

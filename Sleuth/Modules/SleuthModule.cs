@@ -10,6 +10,7 @@ using Sharp.Extensions.GameEventManager;
 using Sharp.Modules.AdminManager.Shared;
 using Sharp.Modules.LocalizerManager.Shared;
 using Sharp.Shared.Enums;
+using Sharp.Shared.GameEntities;
 using Sharp.Shared.GameEvents;
 using Sharp.Shared.HookParams;
 using Sharp.Shared.Listeners;
@@ -255,6 +256,23 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
             client.Print(HudPrintChannel.Chat, ChatFormat.ProcessColorCodes(fallback));
     }
 
+    // Move a controller to a team picking the call that behaves: ChangeTeam (raw entity team
+    // set) for Spectator/UnAssigned — it skips the CS join logic that respawns players during
+    // warmup — and SwitchTeam (controller-level) for playing teams.
+    private static void MoveToTeam(IPlayerController controller, CStrikeTeam team)
+    {
+        if (team <= CStrikeTeam.Spectator)
+            controller.ChangeTeam(team);
+        else
+            controller.SwitchTeam(team);
+    }
+
+    private bool IsWarmup()
+    {
+        try { return _bridge.ModSharp.GetGameRules().IsWarmupPeriod; }
+        catch { return false; }
+    }
+
     // ===== Enable / Disable =====
 
     private void EnableSleuth(IGameClient client, int slot)
@@ -321,14 +339,20 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
 
             if (controller.Team != targetTeam)
             {
-                // Slay a LIVE pawn before the team transfer. Moving a still-alive controller to
-                // Spectator/UnAssigned orphans its pawn — the body stays in the world as a "ghost".
-                // Slaying first removes it cleanly. (No-op if already dead / no pawn.)
+                // Slay the live pawn before the move so it isn't orphaned as a "ghost" body.
+                // Skip during warmup: warmup auto-respawns, so the slay just produces a death
+                // + instant respawn flicker instead of a clean move.
                 var pawn = controller.GetPlayerPawn();
-                if (pawn is { IsValidEntity: true, IsAlive: true })
+                if (pawn is { IsValidEntity: true, IsAlive: true } && !IsWarmup())
                     pawn.Slay();
 
-                controller.SwitchTeam(targetTeam);
+                // Hop through Spectator first: the Spectator join path kills the pawn cleanly,
+                // then drop to UnAssigned for the scoreboard hide. Direct CT/T -> UnAssigned
+                // leaves a ghost body.
+                if (targetTeam == CStrikeTeam.UnAssigned && controller.Team > CStrikeTeam.Spectator)
+                    MoveToTeam(controller, CStrikeTeam.Spectator);
+
+                MoveToTeam(controller, targetTeam);
             }
         }
         else
@@ -358,16 +382,13 @@ internal sealed class SleuthModule : IModule, IClientListener, IGameListener
         if (_connMsg is not null && _config.SilenceAnnouncements)
             _connMsg.SetSilent(slot, false);
 
-        // (c) Restore team
+        // (c) Drop to Spectator so the player reappears and can pick a team themselves.
+        // Restoring the saved team directly was unreliable, so leave the choice to them.
         if (_config.RestoreTeam)
         {
             var controller = client.GetPlayerController();
-            if (controller is not null)
-            {
-                var restore = _savedTeam[slot];
-                if (restore != CStrikeTeam.UnAssigned && controller.Team != restore)
-                    controller.SwitchTeam(restore);
-            }
+            if (controller is not null && controller.Team != CStrikeTeam.Spectator)
+                MoveToTeam(controller, CStrikeTeam.Spectator);
         }
 
         _savedTeam[slot] = CStrikeTeam.UnAssigned;
